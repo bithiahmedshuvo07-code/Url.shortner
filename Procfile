@@ -1,1 +1,1 @@
-web: gunicorn shortner colon app.
+web: gunicorn shortner:app
