@@ -2,9 +2,9 @@ import os
 import random
 import string
 import hashlib
-import urllib.request
+import html
 import json
-from datetime import datetime
+import urllib.request
 
 import psycopg
 from dotenv import load_dotenv
@@ -15,26 +15,45 @@ load_dotenv()
 app = Flask(__name__)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL not found in .env")
 
+SUPPORT_NAME = "Shuvo Ahmed"
+SUPPORT_HANDLE = "@Ahmed_shuvo_786"
+SUPPORT_URL = "https://t.me/Ahmed_shuvo_786"
 
-# ============================================================
-# DATABASE
-# ============================================================
+COUNTRY_NAMES = {
+    "AF": "Afghanistan", "AL": "Albania", "DZ": "Algeria", "AR": "Argentina",
+    "AU": "Australia", "AT": "Austria", "BD": "Bangladesh", "BE": "Belgium",
+    "BR": "Brazil", "BG": "Bulgaria", "KH": "Cambodia", "CA": "Canada",
+    "CL": "Chile", "CN": "China", "CO": "Colombia", "HR": "Croatia",
+    "CZ": "Czechia", "DK": "Denmark", "EG": "Egypt", "EE": "Estonia",
+    "ET": "Ethiopia", "FI": "Finland", "FR": "France", "DE": "Germany",
+    "GH": "Ghana", "GR": "Greece", "HK": "Hong Kong", "HU": "Hungary",
+    "IN": "India", "ID": "Indonesia", "IR": "Iran", "IQ": "Iraq",
+    "IE": "Ireland", "IL": "Israel", "IT": "Italy", "JP": "Japan",
+    "JO": "Jordan", "KE": "Kenya", "KW": "Kuwait", "LV": "Latvia",
+    "LB": "Lebanon", "LY": "Libya", "LT": "Lithuania", "MY": "Malaysia",
+    "MV": "Maldives", "MX": "Mexico", "MA": "Morocco", "MM": "Myanmar",
+    "NP": "Nepal", "NL": "Netherlands", "NZ": "New Zealand", "NG": "Nigeria",
+    "NO": "Norway", "OM": "Oman", "PK": "Pakistan", "PS": "Palestine",
+    "PH": "Philippines", "PL": "Poland", "PT": "Portugal", "QA": "Qatar",
+    "RO": "Romania", "RU": "Russia", "SA": "Saudi Arabia", "RS": "Serbia",
+    "SG": "Singapore", "SK": "Slovakia", "ZA": "South Africa", "KR": "South Korea",
+    "ES": "Spain", "LK": "Sri Lanka", "SE": "Sweden", "CH": "Switzerland",
+    "TW": "Taiwan", "TH": "Thailand", "TR": "Turkey", "UA": "Ukraine",
+    "AE": "United Arab Emirates", "GB": "United Kingdom", "UK": "United Kingdom",
+    "US": "United States", "VN": "Vietnam", "YE": "Yemen",
+}
+
 
 def get_db():
-    return psycopg.connect(
-        DATABASE_URL,
-        connect_timeout=10
-    )
+    return psycopg.connect(DATABASE_URL, connect_timeout=10)
 
 
 def setup_database():
     with get_db() as conn:
         with conn.cursor() as cur:
-
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS links (
                     id BIGSERIAL PRIMARY KEY,
@@ -44,363 +63,351 @@ def setup_database():
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 )
             """)
-
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS click_logs (
                     id BIGSERIAL PRIMARY KEY,
-                    link_id BIGINT REFERENCES links(id)
-                        ON DELETE CASCADE,
+                    link_id BIGINT REFERENCES links(id) ON DELETE CASCADE,
                     short_code TEXT NOT NULL,
                     country TEXT DEFAULT 'Unknown',
-                    device TEXT DEFAULT 'Unknown',
-                    operating_system TEXT DEFAULT 'Unknown',
-                    browser TEXT DEFAULT 'Unknown',
+                    device TEXT DEFAULT 'Others',
+                    operating_system TEXT DEFAULT 'Others',
+                    browser TEXT DEFAULT 'Others',
                     ip_hash TEXT,
                     clicked_at TIMESTAMPTZ DEFAULT NOW()
                 )
             """)
-
         conn.commit()
 
 
-# ============================================================
-# SHORT CODE
-# ============================================================
-
 def generate_short_code(length=7):
     chars = string.ascii_letters + string.digits
-
     while True:
-        code = "".join(
-            random.choice(chars)
-            for _ in range(length)
-        )
-
+        code = "".join(random.choice(chars) for _ in range(length))
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT id FROM links WHERE short_code = %s",
-                    (code,)
-                )
+                cur.execute("SELECT id FROM links WHERE short_code = %s", (code,))
                 exists = cur.fetchone()
-
         if not exists:
             return code
 
 
-# ============================================================
-# VISITOR INFORMATION
-# ============================================================
-
 def get_client_ip():
-    # Render + most proxies
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-
-    real_ip = request.headers.get("X-Real-IP")
-    if real_ip:
-        return real_ip.strip()
-
+    for header in (
+        "CF-Connecting-IP",
+        "True-Client-IP",
+        "X-Real-IP",
+        "X-Forwarded-For",
+        "X-Client-IP",
+    ):
+        value = request.headers.get(header)
+        if value:
+            return value.split(",")[0].strip()
     return request.remote_addr or ""
 
 
+def _fetch_json(url, timeout=2.2):
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "ShuvoAhmedSmartLink/3.0"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
 def get_country(ip):
+    header_code = (
+        request.headers.get("CF-IPCountry")
+        or request.headers.get("CloudFront-Viewer-Country")
+        or request.headers.get("X-AppEngine-Country")
+    )
+    if header_code:
+        code = header_code.strip().upper()
+        if code and code not in ("XX", "T1", "ZZ"):
+            return COUNTRY_NAMES.get(code, code)
+
     if not ip or ip in ("127.0.0.1", "::1"):
         return "Local"
 
-    try:
-        url = f"https://ipwho.is/{ip}"
-        req = urllib.request.Request(
-            url,
-            headers={"User-Agent": "ShuvoAhmedSmartLink/2.0"}
-        )
-        with urllib.request.urlopen(req, timeout=4) as response:
-            data = json.loads(response.read().decode("utf-8"))
-
-        if data.get("success"):
-            country = data.get("country")
-            if country:
-                return country
-    except Exception:
-        pass
-
+    lookups = [
+        ("https://ipwho.is/" + ip, lambda d: d.get("country") if d.get("success") else None),
+        ("https://ipapi.co/" + ip + "/json/", lambda d: None if d.get("error") else d.get("country_name")),
+        ("http://ip-api.com/json/" + ip + "?fields=status,country", lambda d: d.get("country") if d.get("status") == "success" else None),
+    ]
+    for url, pick in lookups:
+        try:
+            data = _fetch_json(url)
+            name = pick(data)
+            if name:
+                return str(name)
+        except Exception:
+            continue
     return "Unknown"
 
 
 def get_device(user_agent):
     ua = (user_agent or "").lower()
-    if "ipad" in ua: return "iPad"
-    if "iphone" in ua: return "iPhone"
-    if "android" in ua: return "Android"
-    if "windows" in ua: return "Windows"
-    if "macintosh" in ua or "mac os" in ua: return "Mac"
-    if "linux" in ua: return "Linux"
-    if "cros" in ua: return "ChromeOS"
-    return "Unknown"
+    if "ipad" in ua:
+        return "iPad"
+    if "iphone" in ua:
+        return "iPhone"
+    if "android" in ua and "mobile" in ua:
+        return "Android"
+    if "android" in ua:
+        return "Android Tablet"
+    if "windows" in ua:
+        return "Windows PC"
+    if "macintosh" in ua or "mac os" in ua:
+        return "Mac"
+    if "cros" in ua:
+        return "ChromeOS"
+    if "linux" in ua:
+        return "Linux"
+    return "Others"
 
 
 def get_operating_system(user_agent):
     ua = (user_agent or "").lower()
-    if "iphone" in ua or "ipad" in ua: return "iOS"
-    if "android" in ua: return "Android"
-    if "windows" in ua: return "Windows"
-    if "mac os" in ua or "macintosh" in ua: return "macOS"
-    if "cros" in ua: return "ChromeOS"
-    if "linux" in ua: return "Linux"
-    return "Unknown"
+    if "iphone" in ua or "ipad" in ua:
+        return "iOS"
+    if "android" in ua:
+        return "Android"
+    if "windows" in ua:
+        return "Windows"
+    if "mac os" in ua or "macintosh" in ua:
+        return "macOS"
+    if "cros" in ua:
+        return "ChromeOS"
+    if "linux" in ua:
+        return "Linux"
+    return "Others"
 
 
 def get_browser(user_agent):
     ua = (user_agent or "").lower()
-    if "edg/" in ua: return "Edge"
-    if "opr/" in ua or "opera" in ua: return "Opera"
-    if "firefox/" in ua: return "Firefox"
-    if "samsungbrowser/" in ua: return "Samsung"
-    if "chrome/" in ua: return "Chrome"
-    if "safari/" in ua and "chrome" not in ua: return "Safari"
-    return "Unknown"
+    if "edg/" in ua:
+        return "Microsoft Edge"
+    if "opr/" in ua or "opera" in ua:
+        return "Opera"
+    if "firefox/" in ua or "fxios" in ua:
+        return "Mozilla Firefox"
+    if "samsungbrowser" in ua:
+        return "Samsung Internet"
+    if "chrome/" in ua or "crios" in ua:
+        return "Google Chrome"
+    if "safari/" in ua and "chrome" not in ua:
+        return "Safari"
+    return "Others"
 
 
 def hash_ip(ip):
-    return hashlib.sha256(ip.encode("utf-8")).hexdigest()
+    return hashlib.sha256((ip or "").encode("utf-8")).hexdigest()
 
 
 def format_dt(dt):
     if not dt:
         return "—"
     try:
-        return dt.strftime("%d %b %Y • %I:%M %p")
-    except:
+        return dt.strftime("%d %b %Y  ·  %I:%M %p")
+    except Exception:
         return str(dt)
 
 
-# ============================================================
-# HOME
-# ============================================================
-
-@app.route("/")
-def home():
-    return """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Shuvo Ahmed SmartLink</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-<style>
+CSS = """
 :root {
-    --primary: #4f46e5;
-    --primary-dark: #4338ca;
-    --bg: #f8fafc;
-    --card: #ffffff;
-    --text: #0f172a;
-    --muted: #64748b;
-    --border: #e2e8f0;
+  --ink: #08090c;
+  --panel: #12141a;
+  --raised: #1b1f28;
+  --line: #2c313c;
+  --gold: #d4af37;
+  --ivory: #f4efe4;
+  --muted: #9a9386;
 }
-* { margin: 0; padding: 0; box-sizing: border-box; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { min-height: 100%; }
 body {
-    font-family: 'Inter', system-ui, sans-serif;
-    background: linear-gradient(135deg, #f0f4ff 0%, #f8fafc 50%, #eef2ff 100%);
-    min-height: 100vh;
-    color: var(--text);
+  font-family: Outfit, system-ui, sans-serif;
+  background: radial-gradient(ellipse at top, rgba(212,175,55,.08), transparent 55%), var(--ink);
+  color: var(--ivory);
 }
-.container { max-width: 720px; margin: 0 auto; padding: 40px 20px; }
-.card {
-    background: var(--card);
-    border-radius: 24px;
-    padding: 40px 36px;
-    box-shadow: 0 20px 50px -12px rgba(79, 70, 229, 0.12);
-    border: 1px solid rgba(255,255,255,0.8);
+a { color: inherit; }
+.wrap { max-width: 1100px; margin: 0 auto; padding: 0 20px; }
+header {
+  border-bottom: 1px solid var(--line);
+  position: sticky; top: 0; z-index: 20;
+  background: rgba(8,9,12,.88);
+  backdrop-filter: blur(12px);
 }
-.logo {
-    font-size: 28px;
-    font-weight: 800;
-    letter-spacing: -0.5px;
-    margin-bottom: 8px;
-    background: linear-gradient(90deg, #4f46e5, #7c3aed);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
+.nav { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 0; }
+.brand { display: flex; align-items: center; gap: 12px; text-decoration: none; }
+.mark {
+  width: 36px; height: 36px; border: 1px solid rgba(212,175,55,.4);
+  border-radius: 8px; display: grid; place-items: center; color: var(--gold);
 }
-.subtitle { color: var(--muted); font-size: 15px; margin-bottom: 32px; }
-form { display: flex; gap: 12px; margin-bottom: 28px; }
-input[type="url"] {
-    flex: 1;
-    padding: 16px 18px;
-    border: 2px solid var(--border);
-    border-radius: 14px;
-    font-size: 15px;
-    font-family: inherit;
-    transition: all 0.2s;
-    outline: none;
+.brand b { display: block; font-family: "Cormorant Garamond", serif; font-size: 20px; font-weight: 600; }
+.brand small { display: block; letter-spacing: .22em; text-transform: uppercase; font-size: 10px; color: var(--muted); }
+.menu { display: flex; flex-wrap: wrap; gap: 4px; }
+.menu a, .menu button {
+  background: none; border: 0; color: var(--muted); padding: 10px 12px;
+  border-radius: 8px; text-decoration: none; font-size: 14px; cursor: pointer;
 }
-input[type="url"]:focus {
-    border-color: var(--primary);
-    box-shadow: 0 0 0 4px rgba(79, 70, 229, 0.12);
+.menu a.active, .menu a:hover, .menu button:hover { color: var(--ivory); background: var(--raised); }
+.menu .gold { color: var(--gold); }
+main { padding: 40px 0 72px; }
+h1, h2, h3 { font-family: "Cormorant Garamond", serif; font-weight: 600; text-wrap: balance; }
+.kicker { color: var(--gold); letter-spacing: .28em; text-transform: uppercase; font-size: 11px; }
+.hero h1 { font-size: clamp(40px, 7vw, 64px); line-height: .95; margin: 12px 0 16px; }
+.hero p { color: var(--muted); max-width: 520px; line-height: 1.6; }
+form.row { display: flex; gap: 12px; margin-top: 32px; }
+input[type=url], input[type=search], .search {
+  width: 100%; min-height: 52px; border: 1px solid var(--line); background: var(--panel);
+  color: var(--ivory); border-radius: 10px; padding: 0 16px; font: inherit; outline: none;
 }
-button {
-    padding: 16px 28px;
-    background: linear-gradient(135deg, #4f46e5, #6366f1);
-    color: white;
-    border: none;
-    border-radius: 14px;
-    font-weight: 700;
-    font-size: 15px;
-    cursor: pointer;
-    transition: all 0.2s;
-    white-space: nowrap;
+input:focus { border-color: var(--gold); }
+.btn {
+  min-height: 52px; border: 0; border-radius: 10px; background: var(--gold); color: var(--ink);
+  font-weight: 700; padding: 0 22px; cursor: pointer; text-decoration: none; display: inline-flex;
+  align-items: center; justify-content: center; white-space: nowrap;
 }
-button:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 8px 20px rgba(79, 70, 229, 0.35);
+.stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin: 28px 0; }
+.stat, .card, .panel {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 16px;
 }
-.menu {
-    display: flex;
-    gap: 10px;
-    flex-wrap: wrap;
+.stat { padding: 22px; }
+.stat b { display: block; font-family: "Cormorant Garamond", serif; font-size: 40px; color: var(--gold); }
+.stat span { color: var(--muted); font-size: 12px; letter-spacing: .16em; text-transform: uppercase; }
+.card { overflow: hidden; }
+.card-h { padding: 20px 22px; border-bottom: 1px solid var(--line); }
+.card-h p { color: var(--muted); font-size: 14px; margin-top: 4px; }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; min-width: 720px; }
+th { text-align: left; font-size: 11px; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--muted); font-weight: 500; background: var(--raised); padding: 12px 18px; }
+td { padding: 14px 18px; border-top: 1px solid var(--line); font-size: 14px; vertical-align: middle; }
+.gold { color: var(--gold); font-weight: 700; text-decoration: none; }
+.muted { color: var(--muted); }
+.tag { display: inline-block; background: var(--raised); color: var(--gold); padding: 4px 10px; border-radius: 6px; font-size: 13px; font-weight: 600; }
+.grid3 { display: grid; gap: 12px; grid-template-columns: 1fr; margin: 22px 0; }
+.panel { padding: 20px; }
+.chip { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; font-size: 14px; border-bottom: 1px solid var(--line); }
+.chip:last-child { border: 0; }
+footer { border-top: 1px solid var(--line); padding: 22px 0; color: var(--muted); font-size: 14px; }
+.foot { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.modal-bg { position: fixed; inset: 0; background: rgba(8,9,12,.82); display: none; place-items: center; padding: 16px; z-index: 50; }
+.modal-bg.open { display: grid; }
+.modal { width: min(440px, 100%); background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 24px; }
+.tg { display: block; margin-top: 18px; padding: 18px; border: 1px solid rgba(212,175,55,.4); border-radius: 12px; text-decoration: none; background: var(--raised); }
+.tg b { display: block; font-family: "Cormorant Garamond", serif; font-size: 28px; }
+.tg span { color: var(--gold); }
+@media (min-width: 800px) { .grid3 { grid-template-columns: 1fr 1fr 1fr; } }
+@media (max-width: 700px) {
+  form.row { flex-direction: column; }
+  .btn { width: 100%; }
 }
-.menu a {
-    padding: 12px 18px;
-    background: #eef2ff;
-    color: #4338ca;
-    text-decoration: none;
-    border-radius: 12px;
-    font-weight: 600;
-    font-size: 14px;
-    transition: all 0.2s;
-}
-.menu a:hover {
-    background: #e0e7ff;
-    transform: translateY(-1px);
-}
-@media (max-width: 600px) {
-    form { flex-direction: column; }
-    button { width: 100%; }
-    .card { padding: 28px 22px; }
-}
-</style>
-</head>
-<body>
-<div class="container">
-    <div class="card">
-        <div class="logo">🔗 Shuvo Ahmed SmartLink</div>
-        <p class="subtitle">Create powerful short links with real-time analytics</p>
-        
-        <form method="POST" action="/create">
-            <input type="url" name="url" placeholder="https://example.com/your-long-url" required>
-            <button type="submit">Create Link</button>
-        </form>
-
-        <div class="menu">
-            <a href="/dashboard">📊 Dashboard</a>
-            <a href="/live-console">🔴 Live Console</a>
-            <a href="/health">❤️ Health</a>
-        </div>
-    </div>
-</div>
-</body>
-</html>
 """
 
 
-# ============================================================
-# CREATE SHORT LINK
-# ============================================================
+def layout(title, body, active=""):
+    def nav(href, key, label):
+        cls = "active" if active == key else ""
+        return f'<a class="{cls}" href="{href}">{label}</a>'
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{html.escape(title)}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@600;700&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>{CSS}</style>
+</head>
+<body>
+<header>
+  <div class="wrap nav">
+    <a class="brand" href="/">
+      <span class="mark">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M10 13a5 5 0 007.07 0l1.41-1.41a5 5 0 00-7.07-7.07L10 5.93" stroke="currentColor" stroke-width="1.8"/><path d="M14 11a5 5 0 00-7.07 0L5.52 12.41a5 5 0 007.07 7.07L14 18.07" stroke="currentColor" stroke-width="1.8"/></svg>
+      </span>
+      <span><b>SmartLink</b><small>Shuvo Ahmed</small></span>
+    </a>
+    <nav class="menu">
+      {nav("/", "home", "Create")}
+      {nav("/dashboard", "dashboard", "Dashboard")}
+      {nav("/live-console", "live", "Live")}
+      <button type="button" class="gold" onclick="openSupport()">Support</button>
+    </nav>
+  </div>
+</header>
+<main><div class="wrap">{body}</div></main>
+<footer>
+  <div class="wrap foot">
+    <span>Shuvo Ahmed SmartLink</span>
+    <button type="button" class="gold" style="background:none;border:0;cursor:pointer;font:inherit;color:var(--gold)" onclick="openSupport()">Support · Telegram</button>
+  </div>
+</footer>
+<div class="modal-bg" id="supportModal" onclick="if(event.target===this)closeSupport()">
+  <div class="modal">
+    <p class="kicker">Support</p>
+    <h2 style="font-size:32px;margin:8px 0 10px">Direct line</h2>
+    <p class="muted">Tap the name to open Telegram and message Shuvo Ahmed.</p>
+    <a class="tg" href="{SUPPORT_URL}" target="_blank" rel="noopener">
+      <b>{SUPPORT_NAME}</b>
+      <span>{SUPPORT_HANDLE}</span>
+      <p class="muted" style="margin-top:10px;letter-spacing:.16em;text-transform:uppercase;font-size:11px">Open Telegram →</p>
+    </a>
+    <p style="margin-top:14px"><button type="button" onclick="closeSupport()" style="background:none;border:0;color:var(--muted);cursor:pointer">Close</button></p>
+  </div>
+</div>
+<script>
+function openSupport(){{ document.getElementById('supportModal').classList.add('open'); }}
+function closeSupport(){{ document.getElementById('supportModal').classList.remove('open'); }}
+</script>
+</body>
+</html>"""
+
+
+@app.route("/")
+def home():
+    body = """
+    <section class="hero">
+      <p class="kicker">Private analytics</p>
+      <h1>Short links with a full paper trail.</h1>
+      <p>Every click records country, device, OS, browser, date and time — separately for each link you create.</p>
+      <form class="row" method="POST" action="/create">
+        <input type="url" name="url" placeholder="https://example.com/your-page" required>
+        <button class="btn" type="submit">Create link</button>
+      </form>
+    </section>
+    """
+    return layout("Shuvo Ahmed SmartLink", body, "home")
+
 
 @app.route("/create", methods=["POST"])
 def create_link():
-    original_url = request.form.get("url", "").strip()
-
+    original_url = (request.form.get("url") or "").strip()
     if not original_url.startswith(("http://", "https://")):
         return "Invalid URL", 400
-
     short_code = generate_short_code()
-
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO links (short_code, original_url) VALUES (%s, %s)",
-                (short_code, original_url)
+                (short_code, original_url),
             )
         conn.commit()
-
     short_url = request.host_url + short_code
-
-    return f"""
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Link Created</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
-<style>
-body {{
-    font-family: 'Inter', sans-serif;
-    background: linear-gradient(135deg, #f0f4ff, #eef2ff);
-    min-height: 100vh;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 20px;
-}}
-.card {{
-    background: white;
-    border-radius: 24px;
-    padding: 48px 40px;
-    text-align: center;
-    box-shadow: 0 25px 50px -12px rgba(79,70,229,0.15);
-    max-width: 520px;
-    width: 100%;
-}}
-h1 {{ font-size: 26px; font-weight: 800; margin-bottom: 12px; color: #0f172a; }}
-.success {{ color: #16a34a; font-size: 15px; margin-bottom: 28px; }}
-.link-box {{
-    background: #f8fafc;
-    border: 2px solid #e2e8f0;
-    border-radius: 14px;
-    padding: 18px;
-    margin-bottom: 28px;
-    word-break: break-all;
-}}
-.link-box a {{
-    color: #4f46e5;
-    font-weight: 700;
-    font-size: 18px;
-    text-decoration: none;
-}}
-.btn {{
-    display: inline-block;
-    padding: 14px 28px;
-    background: linear-gradient(135deg, #4f46e5, #6366f1);
-    color: white;
-    text-decoration: none;
-    border-radius: 12px;
-    font-weight: 700;
-    transition: all 0.2s;
-}}
-.btn:hover {{ transform: translateY(-2px); box-shadow: 0 10px 20px rgba(79,70,229,0.3); }}
-</style>
-</head>
-<body>
-<div class="card">
-    <h1>✅ Link Created!</h1>
-    <p class="success">Your SmartLink is ready to use</p>
-    <div class="link-box">
-        <a href="{short_url}" target="_blank">{short_url}</a>
+    safe_url = html.escape(short_url)
+    body = f"""
+    <p class="kicker">Ready</p>
+    <h1>Link created</h1>
+    <div class="card" style="margin-top:24px;padding:24px">
+      <p class="muted">Your SmartLink</p>
+      <p style="margin:10px 0 18px"><a class="gold" href="{safe_url}">{safe_url}</a></p>
+      <a class="btn" href="/dashboard">Open dashboard</a>
     </div>
-    <a href="/dashboard" class="btn">📊 Open Dashboard</a>
-</div>
-</body>
-</html>
-"""
+    """
+    return layout("Link created · SmartLink", body, "home")
 
-
-# ============================================================
-# DASHBOARD
-# ============================================================
 
 @app.route("/dashboard")
 def dashboard():
@@ -408,249 +415,52 @@ def dashboard():
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT short_code, original_url, clicks, created_at
-                FROM links
-                ORDER BY id DESC
+                FROM links ORDER BY id DESC
             """)
             links = cur.fetchall()
-
             cur.execute("SELECT COUNT(*) FROM links")
             total_links = cur.fetchone()[0]
-
             cur.execute("SELECT COALESCE(SUM(clicks), 0) FROM links")
             total_clicks = cur.fetchone()[0]
 
     rows = ""
-    for link in links:
-        short, url, clicks, created = link
-        display_url = url if len(url) < 55 else url[:52] + "..."
+    for short, url, clicks, created in links:
+        safe_url = html.escape(url)
+        display = safe_url if len(url) < 58 else html.escape(url[:55] + "...")
         rows += f"""
         <tr>
-            <td>
-                <a href="/{short}" class="short-link">/{short}</a>
-            </td>
-            <td class="url-cell" title="{url}">{display_url}</td>
-            <td><span class="badge clicks">{clicks}</span></td>
-            <td class="date">{format_dt(created)}</td>
-            <td>
-                <a href="/analytics/{short}" class="analytics-btn">View Details →</a>
-            </td>
+          <td><a class="gold" href="/{html.escape(short)}">/{html.escape(short)}</a></td>
+          <td class="muted" title="{safe_url}">{display}</td>
+          <td>{int(clicks)}</td>
+          <td class="muted">{format_dt(created)}</td>
+          <td><a href="/analytics/{html.escape(short)}">View A–Z</a></td>
         </tr>
         """
-
     if not rows:
-        rows = """
-        <tr>
-            <td colspan="5" style="text-align:center; padding:40px; color:#64748b;">
-                No links created yet. Create your first SmartLink!
-            </td>
-        </tr>
-        """
+        rows = '<tr><td colspan="5" class="muted" style="text-align:center;padding:48px">No links yet. Create one from the home page.</td></tr>'
 
-    return f"""
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Dashboard • SmartLink</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-<style>
-:root {{
-    --primary: #4f46e5;
-    --bg: #f1f5f9;
-}}
-* {{ margin:0; padding:0; box-sizing:border-box; }}
-body {{
-    font-family: 'Inter', system-ui, sans-serif;
-    background: var(--bg);
-    color: #0f172a;
-    min-height: 100vh;
-}}
-.container {{ max-width: 1100px; margin: 0 auto; padding: 32px 20px; }}
-.header {{
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 32px;
-    flex-wrap: wrap;
-    gap: 16px;
-}}
-.header h1 {{
-    font-size: 28px;
-    font-weight: 800;
-    letter-spacing: -0.5px;
-}}
-.header a {{
-    color: #4f46e5;
-    text-decoration: none;
-    font-weight: 600;
-    font-size: 14px;
-}}
-.stats {{
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 16px;
-    margin-bottom: 28px;
-}}
-.stat-card {{
-    background: white;
-    border-radius: 18px;
-    padding: 24px;
-    box-shadow: 0 4px 20px rgba(0,0,0,0.04);
-    border: 1px solid #e2e8f0;
-}}
-.stat-card h2 {{
-    font-size: 32px;
-    font-weight: 800;
-    color: #4f46e5;
-    margin-bottom: 4px;
-}}
-.stat-card p {{
-    color: #64748b;
-    font-size: 14px;
-    font-weight: 500;
-}}
-.card {{
-    background: white;
-    border-radius: 20px;
-    padding: 8px;
-    box-shadow: 0 4px 24px rgba(0,0,0,0.05);
-    border: 1px solid #e2e8f0;
-    overflow: hidden;
-}}
-.card-header {{
-    padding: 20px 24px 12px;
-    font-size: 17px;
-    font-weight: 700;
-}}
-table {{
-    width: 100%;
-    border-collapse: collapse;
-}}
-th {{
-    text-align: left;
-    padding: 14px 20px;
-    font-size: 12px;
-    font-weight: 600;
-    color: #64748b;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    background: #f8fafc;
-    border-bottom: 1px solid #e2e8f0;
-}}
-td {{
-    padding: 16px 20px;
-    border-bottom: 1px solid #f1f5f9;
-    font-size: 14px;
-    vertical-align: middle;
-}}
-tr:last-child td {{ border-bottom: none; }}
-tr:hover td {{ background: #f8fafc; }}
-.short-link {{
-    color: #4f46e5;
-    font-weight: 700;
-    text-decoration: none;
-    font-size: 15px;
-}}
-.short-link:hover {{ text-decoration: underline; }}
-.url-cell {{
-    color: #475569;
-    max-width: 280px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}}
-.badge {{
-    display: inline-block;
-    padding: 4px 12px;
-    border-radius: 20px;
-    font-weight: 700;
-    font-size: 13px;
-}}
-.badge.clicks {{
-    background: #eef2ff;
-    color: #4338ca;
-}}
-.date {{
-    color: #64748b;
-    font-size: 13px;
-    white-space: nowrap;
-}}
-.analytics-btn {{
-    color: #4f46e5;
-    font-weight: 600;
-    text-decoration: none;
-    font-size: 13px;
-}}
-.analytics-btn:hover {{ text-decoration: underline; }}
-.footer-links {{
-    margin-top: 24px;
-    display: flex;
-    gap: 16px;
-}}
-.footer-links a {{
-    color: #4f46e5;
-    font-weight: 600;
-    text-decoration: none;
-    font-size: 14px;
-}}
-@media (max-width: 700px) {{
-    .url-cell {{ max-width: 140px; }}
-    th, td {{ padding: 12px 14px; }}
-}}
-</style>
-</head>
-<body>
-<div class="container">
-    <div class="header">
-        <h1>📊 Dashboard</h1>
-        <a href="/">← Create New Link</a>
-    </div>
-
+    body = f"""
+    <p class="kicker">Overview</p>
+    <h1>Dashboard</h1>
     <div class="stats">
-        <div class="stat-card">
-            <h2>{total_links}</h2>
-            <p>Total Links</p>
-        </div>
-        <div class="stat-card">
-            <h2>{total_clicks}</h2>
-            <p>Total Clicks</p>
-        </div>
+      <div class="stat"><b>{total_links}</b><span>Links created</span></div>
+      <div class="stat"><b>{total_clicks}</b><span>Total clicks</span></div>
     </div>
-
     <div class="card">
-        <div class="card-header">All Your SmartLinks</div>
-        <div style="overflow-x:auto;">
-            <table>
-                <thead>
-                    <tr>
-                        <th>Short Link</th>
-                        <th>Destination</th>
-                        <th>Clicks</th>
-                        <th>Created</th>
-                        <th>Analytics</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {rows}
-                </tbody>
-            </table>
-        </div>
+      <div class="card-h">
+        <h2>Every link, separately</h2>
+        <p>Open any row to see country, device, browser, date and time for that link only.</p>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Short link</th><th>Destination</th><th>Clicks</th><th>Created</th><th>Details</th></tr></thead>
+          <tbody>{rows}</tbody>
+        </table>
+      </div>
     </div>
+    """
+    return layout("Dashboard · SmartLink", body, "dashboard")
 
-    <div class="footer-links">
-        <a href="/live-console">🔴 Live Console</a>
-        <a href="/">+ Create New</a>
-    </div>
-</div>
-</body>
-</html>
-"""
-
-
-# ============================================================
-# ANALYTICS
-# ============================================================
 
 @app.route("/analytics/<short_code>")
 def analytics(short_code):
@@ -658,270 +468,82 @@ def analytics(short_code):
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT id, short_code, original_url, clicks, created_at
-                FROM links
-                WHERE short_code = %s
+                FROM links WHERE short_code = %s
             """, (short_code,))
             link = cur.fetchone()
-
             if not link:
                 abort(404)
-
             link_id, sc, original_url, clicks, created_at = link
-
             cur.execute("""
                 SELECT country, device, operating_system, browser, clicked_at
-                FROM click_logs
-                WHERE link_id = %s
-                ORDER BY id DESC
-                LIMIT 150
+                FROM click_logs WHERE link_id = %s
+                ORDER BY id DESC LIMIT 200
             """, (link_id,))
             click_rows = cur.fetchall()
-
-            # Simple aggregates
             cur.execute("""
-                SELECT country, COUNT(*) 
-                FROM click_logs 
-                WHERE link_id = %s 
-                GROUP BY country 
-                ORDER BY COUNT(*) DESC 
-                LIMIT 5
+                SELECT country, COUNT(*) FROM click_logs
+                WHERE link_id = %s GROUP BY country ORDER BY COUNT(*) DESC LIMIT 8
             """, (link_id,))
             top_countries = cur.fetchall()
-
             cur.execute("""
-                SELECT device, COUNT(*) 
-                FROM click_logs 
-                WHERE link_id = %s 
-                GROUP BY device 
-                ORDER BY COUNT(*) DESC 
-                LIMIT 5
+                SELECT device, COUNT(*) FROM click_logs
+                WHERE link_id = %s GROUP BY device ORDER BY COUNT(*) DESC LIMIT 8
             """, (link_id,))
             top_devices = cur.fetchall()
+            cur.execute("""
+                SELECT browser, COUNT(*) FROM click_logs
+                WHERE link_id = %s GROUP BY browser ORDER BY COUNT(*) DESC LIMIT 8
+            """, (link_id,))
+            top_browsers = cur.fetchall()
 
-    # Build top countries / devices html
-    countries_html = ""
-    for c, cnt in top_countries:
-        countries_html += f'<div class="chip"><span>{c or "Unknown"}</span><strong>{cnt}</strong></div>'
-
-    devices_html = ""
-    for d, cnt in top_devices:
-        devices_html += f'<div class="chip"><span>{d or "Unknown"}</span><strong>{cnt}</strong></div>'
-
-    if not countries_html:
-        countries_html = '<div class="empty">No data yet</div>'
-    if not devices_html:
-        devices_html = '<div class="empty">No data yet</div>'
+    def chips(items):
+        if not items:
+            return '<p class="muted">No data yet</p>'
+        out = ""
+        for name, n in items:
+            out += f'<div class="chip"><span>{html.escape(str(name or "Unknown"))}</span><b class="gold">{int(n)}</b></div>'
+        return out
 
     rows = ""
-    for click in click_rows:
-        country, device, os, browser, clicked_at = click
+    for country, device, os_name, browser, clicked_at in click_rows:
         rows += f"""
         <tr>
-            <td><span class="tag">{country or "Unknown"}</span></td>
-            <td>{device or "Unknown"}</td>
-            <td>{os or "Unknown"}</td>
-            <td>{browser or "Unknown"}</td>
-            <td class="time">{format_dt(clicked_at)}</td>
+          <td><span class="tag">{html.escape(country or "Unknown")}</span></td>
+          <td>{html.escape(device or "Others")}</td>
+          <td>{html.escape(os_name or "Others")}</td>
+          <td>{html.escape(browser or "Others")}</td>
+          <td class="muted">{format_dt(clicked_at)}</td>
         </tr>
         """
-
     if not rows:
-        rows = """
-        <tr>
-            <td colspan="5" style="text-align:center;padding:40px;color:#64748b;">
-                No clicks recorded yet for this link.
-            </td>
-        </tr>
-        """
+        rows = '<tr><td colspan="5" class="muted" style="text-align:center;padding:48px">No clicks yet for this link.</td></tr>'
 
-    return f"""
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Analytics • /{sc}</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-<style>
-* {{ margin:0; padding:0; box-sizing:border-box; }}
-body {{
-    font-family: 'Inter', system-ui, sans-serif;
-    background: #f1f5f9;
-    color: #0f172a;
-    min-height: 100vh;
-}}
-.container {{ max-width: 1100px; margin: 0 auto; padding: 32px 20px; }}
-.back {{
-    display: inline-block;
-    margin-bottom: 20px;
-    color: #4f46e5;
-    text-decoration: none;
-    font-weight: 600;
-    font-size: 14px;
-}}
-.header-card {{
-    background: white;
-    border-radius: 20px;
-    padding: 28px 32px;
-    margin-bottom: 24px;
-    box-shadow: 0 4px 20px rgba(0,0,0,0.04);
-    border: 1px solid #e2e8f0;
-}}
-.header-card h1 {{
-    font-size: 24px;
-    font-weight: 800;
-    margin-bottom: 8px;
-}}
-.header-card .url {{
-    color: #64748b;
-    font-size: 14px;
-    word-break: break-all;
-    margin-bottom: 16px;
-}}
-.big-stat {{
-    font-size: 42px;
-    font-weight: 800;
-    color: #4f46e5;
-}}
-.big-stat span {{
-    font-size: 16px;
-    font-weight: 600;
-    color: #64748b;
-    margin-left: 8px;
-}}
-.grid {{
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 20px;
-    margin-bottom: 24px;
-}}
-@media (max-width: 700px) {{ .grid {{ grid-template-columns: 1fr; }} }}
-.panel {{
-    background: white;
-    border-radius: 18px;
-    padding: 22px;
-    box-shadow: 0 4px 16px rgba(0,0,0,0.04);
-    border: 1px solid #e2e8f0;
-}}
-.panel h3 {{
-    font-size: 14px;
-    font-weight: 700;
-    color: #64748b;
-    text-transform: uppercase;
-    letter-spacing: 0.4px;
-    margin-bottom: 16px;
-}}
-.chip {{
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 10px 14px;
-    background: #f8fafc;
-    border-radius: 10px;
-    margin-bottom: 8px;
-    font-size: 14px;
-}}
-.chip strong {{
-    background: #eef2ff;
-    color: #4338ca;
-    padding: 2px 10px;
-    border-radius: 20px;
-    font-size: 13px;
-}}
-.empty {{ color: #94a3b8; font-size: 14px; }}
-.card {{
-    background: white;
-    border-radius: 20px;
-    overflow: hidden;
-    box-shadow: 0 4px 20px rgba(0,0,0,0.04);
-    border: 1px solid #e2e8f0;
-}}
-.card-title {{
-    padding: 20px 24px;
-    font-size: 16px;
-    font-weight: 700;
-    border-bottom: 1px solid #f1f5f9;
-}}
-table {{ width: 100%; border-collapse: collapse; }}
-th {{
-    text-align: left;
-    padding: 13px 20px;
-    font-size: 12px;
-    font-weight: 600;
-    color: #64748b;
-    text-transform: uppercase;
-    background: #f8fafc;
-}}
-td {{
-    padding: 14px 20px;
-    border-bottom: 1px solid #f1f5f9;
-    font-size: 14px;
-}}
-tr:last-child td {{ border-bottom: none; }}
-.tag {{
-    display: inline-block;
-    padding: 4px 10px;
-    background: #ecfdf5;
-    color: #047857;
-    border-radius: 6px;
-    font-weight: 600;
-    font-size: 13px;
-}}
-.time {{ color: #64748b; font-size: 13px; white-space: nowrap; }}
-</style>
-</head>
-<body>
-<div class="container">
-    <a href="/dashboard" class="back">← Back to Dashboard</a>
-
-    <div class="header-card">
-        <h1>/{sc}</h1>
-        <div class="url">{original_url}</div>
-        <div class="big-stat">{clicks} <span>total clicks</span></div>
-        <div style="margin-top:8px;color:#64748b;font-size:13px;">
-            Created: {format_dt(created_at)}
-        </div>
+    body = f"""
+    <p><a class="gold" href="/dashboard">← Dashboard</a></p>
+    <h1 style="margin-top:12px">/{html.escape(sc)}</h1>
+    <p class="muted" style="margin:8px 0 16px;word-break:break-all">{html.escape(original_url)}</p>
+    <p style="font-family:'Cormorant Garamond',serif;font-size:48px;color:var(--gold)">{int(clicks)} <span class="muted" style="font-size:22px">clicks</span></p>
+    <p class="muted">Created {format_dt(created_at)}</p>
+    <div class="grid3">
+      <div class="panel"><p class="kicker">Countries</p>{chips(top_countries)}</div>
+      <div class="panel"><p class="kicker">Devices</p>{chips(top_devices)}</div>
+      <div class="panel"><p class="kicker">Browsers</p>{chips(top_browsers)}</div>
     </div>
-
-    <div class="grid">
-        <div class="panel">
-            <h3>Top Countries</h3>
-            {countries_html}
-        </div>
-        <div class="panel">
-            <h3>Top Devices</h3>
-            {devices_html}
-        </div>
-    </div>
-
     <div class="card">
-        <div class="card-title">Recent Clicks (Latest 150)</div>
-        <div style="overflow-x:auto;">
-            <table>
-                <thead>
-                    <tr>
-                        <th>Country</th>
-                        <th>Device</th>
-                        <th>OS</th>
-                        <th>Browser</th>
-                        <th>Date & Time</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {rows}
-                </tbody>
-            </table>
-        </div>
+      <div class="card-h">
+        <h2>Click log</h2>
+        <p>Country · device · OS · browser · date · time</p>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Country</th><th>Device</th><th>OS</th><th>Browser</th><th>Date & time</th></tr></thead>
+          <tbody>{rows}</tbody>
+        </table>
+      </div>
     </div>
-</div>
-</body>
-</html>
-"""
+    """
+    return layout(f"Analytics · /{sc}", body, "dashboard")
 
-
-# ============================================================
-# LIVE CLICK API
-# ============================================================
 
 @app.route("/api/live-clicks")
 def live_clicks():
@@ -929,281 +551,126 @@ def live_clicks():
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT id, short_code, country, device, operating_system, browser, clicked_at
-                FROM click_logs
-                ORDER BY id DESC
-                LIMIT 100
+                FROM click_logs ORDER BY id DESC LIMIT 120
             """)
             rows = cur.fetchall()
-
     data = []
     for row in rows:
         data.append({
             "id": row[0],
             "short_code": row[1],
             "country": row[2] or "Unknown",
-            "device": row[3] or "Unknown",
-            "os": row[4] or "Unknown",
-            "browser": row[5] or "Unknown",
-            "clicked_at": row[6].isoformat() if row[6] else None
+            "device": row[3] or "Others",
+            "os": row[4] or "Others",
+            "browser": row[5] or "Others",
+            "clicked_at": row[6].isoformat() if row[6] else None,
         })
-
     return jsonify(data)
 
 
-# ============================================================
-# LIVE CONSOLE
-# ============================================================
-
 @app.route("/live-console")
 def live_console():
-    return """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Live Console • SmartLink</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-<style>
-* { margin:0; padding:0; box-sizing:border-box; }
-body {
-    font-family: 'Inter', system-ui, sans-serif;
-    background: #0b1120;
-    color: #e2e8f0;
-    min-height: 100vh;
-}
-.container { max-width: 1200px; margin: 0 auto; padding: 28px 20px; }
-.header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 28px;
-    flex-wrap: wrap;
-    gap: 16px;
-}
-.header h1 {
-    font-size: 26px;
-    font-weight: 800;
-    letter-spacing: -0.5px;
-}
-.header p { color: #94a3b8; font-size: 14px; margin-top: 4px; }
-.live-badge {
-    background: linear-gradient(90deg, #064e3b, #065f46);
-    color: #6ee7b7;
-    padding: 8px 16px;
-    border-radius: 30px;
-    font-weight: 700;
-    font-size: 13px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-.dot {
-    width: 8px;
-    height: 8px;
-    background: #34d399;
-    border-radius: 50%;
-    animation: pulse 1.5s infinite;
-}
-@keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.4; }
-}
-.panel {
-    background: #111827;
-    border-radius: 18px;
-    overflow: hidden;
-    border: 1px solid #1e293b;
-}
-.search {
-    width: 100%;
-    padding: 16px 20px;
-    background: #0f172a;
-    border: none;
-    border-bottom: 1px solid #1e293b;
-    color: white;
-    font-size: 15px;
-    font-family: inherit;
-    outline: none;
-}
-.search::placeholder { color: #64748b; }
-.table-wrapper { overflow-x: auto; }
-table { width: 100%; min-width: 800px; border-collapse: collapse; }
-th {
-    text-align: left;
-    padding: 14px 18px;
-    font-size: 11px;
-    font-weight: 600;
-    color: #64748b;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    background: #0f172a;
-}
-td {
-    padding: 14px 18px;
-    border-bottom: 1px solid #1e293b;
-    font-size: 14px;
-}
-tr:hover td { background: #1e293b; }
-.country-tag {
-    background: #064e3b;
-    color: #6ee7b7;
-    padding: 3px 10px;
-    border-radius: 6px;
-    font-size: 12px;
-    font-weight: 600;
-}
-.back {
-    display: inline-block;
-    margin-top: 24px;
-    color: #818cf8;
-    text-decoration: none;
-    font-weight: 600;
-    font-size: 14px;
-}
-</style>
-</head>
-<body>
-<div class="container">
-    <div class="header">
-        <div>
-            <h1>🔴 Live Console</h1>
-            <p>Real-time click activity across all links</p>
-        </div>
-        <div class="live-badge">
-            <div class="dot"></div>
-            LIVE
-        </div>
+    body = """
+    <p class="kicker">Live</p>
+    <h1>Click console</h1>
+    <p class="muted" style="margin:8px 0 22px">Country, device, OS, browser, date and time — updating every 2 seconds.</p>
+    <div class="card">
+      <input id="search" class="search" placeholder="Search country, device, browser or link…">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Date & time</th><th>Link</th><th>Country</th>
+              <th>Device</th><th>OS</th><th>Browser</th>
+            </tr>
+          </thead>
+          <tbody id="events">
+            <tr><td colspan="6" class="muted" style="text-align:center;padding:48px">Waiting for clicks…</td></tr>
+          </tbody>
+        </table>
+      </div>
     </div>
-
-    <div class="panel">
-        <input id="search" class="search" placeholder="Search by country, device, browser or short link...">
-        <div class="table-wrapper">
-            <table>
-                <thead>
-                    <tr>
-                        <th>Time</th>
-                        <th>Link</th>
-                        <th>Country</th>
-                        <th>Device</th>
-                        <th>OS</th>
-                        <th>Browser</th>
-                    </tr>
-                </thead>
-                <tbody id="events">
-                    <tr>
-                        <td colspan="6" style="text-align:center;padding:40px;color:#64748b;">
-                            Waiting for clicks...
-                        </td>
-                    </tr>
-                </tbody>
-            </table>
-        </div>
-    </div>
-
-    <a href="/dashboard" class="back">← Back to Dashboard</a>
-</div>
-
-<script>
-let events = [];
-
-function renderEvents() {
-    const search = document.getElementById("search").value.toLowerCase();
-    const body = document.getElementById("events");
-
-    const filtered = events.filter(e => {
-        const text = (e.short_code + " " + e.country + " " + e.device + " " + e.os + " " + e.browser).toLowerCase();
-        return text.includes(search);
-    });
-
-    if (filtered.length === 0) {
-        body.innerHTML = "<tr><td colspan='6' style='text-align:center;padding:40px;color:#64748b;'>No matching events</td></tr>";
+    <script>
+    let events = [];
+    function renderEvents() {
+      const q = document.getElementById('search').value.toLowerCase();
+      const body = document.getElementById('events');
+      const filtered = events.filter(e => (
+        e.short_code + ' ' + e.country + ' ' + e.device + ' ' + e.os + ' ' + e.browser
+      ).toLowerCase().includes(q));
+      if (!filtered.length) {
+        body.innerHTML = "<tr><td colspan='6' class='muted' style='text-align:center;padding:48px'>No matching events</td></tr>";
         return;
-    }
-
-    body.innerHTML = filtered.map(e => {
-        const time = new Date(e.clicked_at).toLocaleString();
-        return `
-        <tr>
-            <td style="color:#94a3b8;font-size:13px;">${time}</td>
-            <td style="font-weight:600;color:#a5b4fc;">/${e.short_code}</td>
-            <td><span class="country-tag">${e.country}</span></td>
-            <td>${e.device}</td>
-            <td>${e.os}</td>
-            <td>${e.browser}</td>
+      }
+      body.innerHTML = filtered.map(e => {
+        const t = e.clicked_at ? new Date(e.clicked_at).toLocaleString() : '—';
+        return `<tr>
+          <td class="muted">${t}</td>
+          <td><a class="gold" href="/analytics/\( {e.short_code}">/ \){e.short_code}</a></td>
+          <td><span class="tag">${e.country}</span></td>
+          <td>${e.device}</td>
+          <td>${e.os}</td>
+          <td>${e.browser}</td>
         </tr>`;
-    }).join("");
-}
-
-async function loadEvents() {
-    try {
-        const res = await fetch("/api/live-clicks", { cache: "no-store" });
+      }).join('');
+    }
+    async function loadEvents() {
+      try {
+        const res = await fetch('/api/live-clicks', { cache: 'no-store' });
         if (!res.ok) return;
         events = await res.json();
         renderEvents();
-    } catch (err) {
-        console.log("Live console error:", err);
+      } catch (err) {}
     }
-}
-
-document.getElementById("search").addEventListener("input", renderEvents);
-loadEvents();
-setInterval(loadEvents, 2000);
-</script>
-</body>
-</html>
-"""
+    document.getElementById('search').addEventListener('input', renderEvents);
+    loadEvents();
+    setInterval(loadEvents, 2000);
+    </script>
+    """
+    return layout("Live Console · SmartLink", body, "live")
 
 
-# ============================================================
-# SHORT LINK REDIRECT + CLICK TRACKING
-# ============================================================
+@app.route("/support")
+def support():
+    return redirect(SUPPORT_URL)
+
 
 @app.route("/<short_code>")
 def redirect_short_link(short_code):
+    reserved = {"create", "dashboard", "analytics", "live-console", "health", "api", "support"}
+    if short_code in reserved:
+        abort(404)
+
     user_agent = request.headers.get("User-Agent", "")
     ip = get_client_ip()
     country = get_country(ip)
     device = get_device(user_agent)
     operating_system = get_operating_system(user_agent)
     browser = get_browser(user_agent)
-    ip_hash = hash_ip(ip)
+    ip_hash_value = hash_ip(ip)
 
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT id, original_url FROM links WHERE short_code = %s",
-                (short_code,)
+                (short_code,),
             )
             link = cur.fetchone()
-
             if not link:
                 abort(404)
-
             link_id, original_url = link
-
-            cur.execute(
-                "UPDATE links SET clicks = clicks + 1 WHERE id = %s",
-                (link_id,)
-            )
-
+            cur.execute("UPDATE links SET clicks = clicks + 1 WHERE id = %s", (link_id,))
             cur.execute("""
                 INSERT INTO click_logs
                 (link_id, short_code, country, device, operating_system, browser, ip_hash)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
             """, (
                 link_id, short_code, country, device,
-                operating_system, browser, ip_hash
+                operating_system, browser, ip_hash_value,
             ))
-
         conn.commit()
-
     return redirect(original_url)
 
-
-# ============================================================
-# HEALTH CHECK
-# ============================================================
 
 @app.route("/health")
 def health():
@@ -1212,41 +679,16 @@ def health():
             with conn.cursor() as cur:
                 cur.execute("SELECT 1")
                 result = cur.fetchone()[0]
-
-        return jsonify({
-            "status": "ok",
-            "database": result == 1
-        })
+        return jsonify({"status": "ok", "database": result == 1})
     except Exception as error:
-        return jsonify({
-            "status": "error",
-            "database": False,
-            "error": str(error)
-        }), 500
+        return jsonify({"status": "error", "database": False, "error": str(error)}), 500
 
 
-# ============================================================
-# START
-# ============================================================
+try:
+    setup_database()
+except Exception as exc:
+    print("database setup:", exc)
 
 if __name__ == "__main__":
-    setup_database()
-
-    print()
-    print("=" * 60)
-    print("       SHUVO AHMED SMARTLINK  •  PREMIUM")
-    print("=" * 60)
-    print("Database       : CONNECTED")
-    print("Link System    : ACTIVE")
-    print("Click Tracking : ACTIVE")
-    print("Analytics      : ACTIVE")
-    print("Live Console   : ACTIVE")
-    print("=" * 60)
-    print("Home          : http://127.0.0.1:8080/")
-    print("Dashboard     : http://127.0.0.1:8080/dashboard")
-    print("Live Console  : http://127.0.0.1:8080/live-console")
-    print("Health        : http://127.0.0.1:8080/health")
-    print("=" * 60)
-    print()
-
-    app.run(host="127.0.0.1", port=8080, debug=True)
+    print("SHUVO AHMED SMARTLINK · PREMIUM")
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")), debug=False)
