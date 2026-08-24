@@ -1,1 +1,1 @@
-web: gunicorn shortner:app
+web: gunicorn app:app
